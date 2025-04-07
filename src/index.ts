@@ -15,6 +15,7 @@ const RPC_URL = process.env.RPC_URL;
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const CHECK_INTERVAL = Number.parseInt(process.env.CHECK_INTERVAL || "10000");
 const PROTOCOL_ADDRESS = process.env.PROTOCOL_ADDRESS; // Add this to .env.example
+const EXECUTION_MODE = process.env.EXECUTION_MODE || "preview"; // Default to preview mode
 
 // Validate required configuration
 if (!RPC_URL) {
@@ -158,7 +159,7 @@ async function executeAction(requisition: RequisitionEvent): Promise<void> {
 		// Use empty operator data instead of trying to insert the operator address
 		const operatorData = "0x";
 
-		// First simulate the transaction to check if it will succeed
+		// Always simulate the transaction to check if it will succeed
 		console.log("Simulating transaction...");
 		try {
 			await contract.tractor.staticCall(requisition.requisition, operatorData, {
@@ -168,13 +169,27 @@ async function executeAction(requisition: RequisitionEvent): Promise<void> {
 				"Simulation successful! Transaction should execute properly.",
 			);
 		} catch (error) {
-			console.error("Transaction simulation failed:", error);
+			// Extract and log just the short message
+			const errorMessage =
+				error && typeof error === "object" && "shortMessage" in error
+					? error.shortMessage
+					: "Unknown error";
+			console.error("Transaction simulation failed:", errorMessage);
 			console.log("Not sending the transaction to avoid wasting gas.");
 			return;
 		}
 
-		// If simulation was successful, proceed with the actual transaction
-		console.log("Submitting tractor transaction...");
+		// Check execution mode before sending the actual transaction
+		if (EXECUTION_MODE.toLowerCase() === "preview") {
+			console.log("Running in PREVIEW mode. Transaction not sent.");
+			console.log(
+				"To execute transactions, set EXECUTION_MODE=execute in your .env file.",
+			);
+			return;
+		}
+
+		// If simulation was successful and we're in execute mode, proceed with the actual transaction
+		console.log("Running in EXECUTE mode. Submitting tractor transaction...");
 		const tx = await contract.tractor(requisition.requisition, operatorData, {
 			gasLimit: 5000000, // Add some extra gas just to be safe
 		});
@@ -214,6 +229,7 @@ async function monitor(): Promise<void> {
 // Start the monitoring process
 console.log(`Bot starting with check interval of ${CHECK_INTERVAL}ms`);
 console.log(`Wallet address: ${wallet.address}`);
+console.log(`Execution mode: ${EXECUTION_MODE}`);
 monitor().catch((error) => {
 	console.error("Fatal error in monitoring process:", error);
 	process.exit(1);
