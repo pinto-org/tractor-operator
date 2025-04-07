@@ -46,13 +46,6 @@ The bot can operate in two modes:
 
 By default, the bot runs in preview mode. To enable execution, set `EXECUTION_MODE=execute` in your `.env` file.
 
-## Customization
-
-To implement your specific on-chain action logic:
-
-1. Update the `checkActionCanBeExecuted()` function in `src/index.ts` to determine when the action should be executed.
-2. Update the `executeAction()` function in `src/index.ts` to perform the action when conditions are met.
-
 ## Security Notes
 
 - Never commit your `.env` file containing your private key
