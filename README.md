@@ -1,6 +1,6 @@
 # Tractor Operator Bot
 
-A blockchain monitoring bot that checks if a specific on-chain action can be executed.
+A Base blockchain monitoring bot that checks if tractor orders can be executed, and execute them.
 
 ## Setup
 
@@ -52,3 +52,6 @@ By default, the bot runs in preview mode. To enable execution, set `EXECUTION_MO
 - Consider using a hardware wallet or key management solution for production deployments
 - The private key in the `.env` file should be for a wallet with only the minimum necessary funds 
 
+## WARNING
+
+This bot has not been tested in production, use at your own risk! Pinto contributors and not responsible for how this code is used.
