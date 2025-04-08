@@ -417,6 +417,44 @@ const chainlinkPriceFeedABI = [
 	},
 ];
 
+// Add the BeanstalkPrice contract address and ABI
+
+// BeanstalkPrice contract address on Base
+export const BEANSTALK_PRICE_ADDRESS =
+	"0xD0fd333F7B30c7925DEBD81B7b7a4DFE106c3a5E";
+
+// ABI for BeanstalkPrice contract - just what we need for price()
+const beanstalkPriceABI = [
+	{
+		inputs: [],
+		name: "price",
+		outputs: [
+			{
+				components: [
+					{ internalType: "uint256", name: "price", type: "uint256" },
+					{ internalType: "uint256", name: "liquidity", type: "uint256" },
+					{ internalType: "int256", name: "deltaB", type: "int256" },
+					{
+						components: [
+							{ internalType: "uint256", name: "price", type: "uint256" },
+							{ internalType: "uint256", name: "liquidity", type: "uint256" },
+							{ internalType: "int256", name: "deltaB", type: "int256" },
+						],
+						internalType: "struct P.Pool[]",
+						name: "ps",
+						type: "tuple[]",
+					},
+				],
+				internalType: "struct BeanstalkPrice.Prices",
+				name: "p",
+				type: "tuple",
+			},
+		],
+		stateMutability: "view",
+		type: "function",
+	},
+];
+
 /**
  * Helper function to get token index from contract
  */
@@ -1403,6 +1441,38 @@ export async function getEthUsdPrice(
 		return price;
 	} catch (error) {
 		console.error("Failed to fetch ETH/USD price:", error);
+		return 0; // Return 0 if we couldn't fetch the price
+	}
+}
+
+/**
+ * Fetches the current Pinto/USD price from BeanstalkPrice contract on Base
+ * @param provider Ethers provider
+ * @returns The Pinto/USD price with full precision
+ */
+export async function getPintoUsdPrice(
+	provider: ethers.Provider,
+): Promise<number> {
+	try {
+		const priceContract = new ethers.Contract(
+			BEANSTALK_PRICE_ADDRESS,
+			beanstalkPriceABI,
+			provider,
+		);
+
+		// Get the price data
+		const priceData = await priceContract.price();
+
+		// The price is returned as a fixed-point number with 6 decimals
+		// 1000000 = $1.00
+		const pintoPrice = Number(priceData.price) / 1e6;
+
+		// Log the price
+		console.log(`Current Pinto/USD price: $${pintoPrice.toFixed(6)}`);
+
+		return pintoPrice;
+	} catch (error) {
+		console.error("Failed to fetch Pinto/USD price:", error);
 		return 0; // Return 0 if we couldn't fetch the price
 	}
 }

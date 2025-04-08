@@ -5,6 +5,7 @@ import {
 	SOW_BLUEPRINT_V0_ADDRESS,
 	findOperatorPlaceholderOffset,
 	getEthUsdPrice,
+	getPintoUsdPrice,
 } from "./tractor-utils";
 import type { RequisitionEvent } from "./tractor-utils";
 
@@ -47,6 +48,8 @@ type SimulationResult = {
 	gasCostEth?: number;
 	gasCostUsd?: number;
 	operatorTip?: string;
+	operatorTipUsd?: number;
+	estimatedProfitUsd?: number;
 };
 
 // Function to check if an action can be executed
@@ -73,6 +76,16 @@ async function checkForExecutableRequisitions(): Promise<{
 		} catch (priceError) {
 			console.error("Failed to fetch ETH/USD price:", priceError);
 			// Continue without USD price if fetching fails
+		}
+
+		// Fetch Pinto/USD price once at the beginning
+		let pintoUsdPrice = 0;
+		try {
+			pintoUsdPrice = await getPintoUsdPrice(provider);
+			console.log(`Current Pinto/USD price: $${pintoUsdPrice.toFixed(6)}`);
+		} catch (priceError) {
+			console.error("Failed to fetch Pinto/USD price:", priceError);
+			// Continue without Pinto price if fetching fails
 		}
 
 		// Fetch active requisitions of type sowBlueprintv0
@@ -206,6 +219,25 @@ async function checkForExecutableRequisitions(): Promise<{
 									const usdCost = result.gasCostEth * ethUsdPrice;
 									console.log(`   Estimated cost: $${usdCost.toFixed(6)} USD`);
 									result.gasCostUsd = usdCost;
+
+									// Calculate USD value of tip if we have the price
+									if (pintoUsdPrice > 0) {
+										const tipPinto = Number(result.operatorTip) / 1e6; // Convert from Pinto units (6 decimals)
+										const tipUsd = tipPinto * pintoUsdPrice;
+										result.operatorTipUsd = tipUsd;
+										console.log(
+											`  Operator tip value: $${tipUsd.toFixed(6)} USD`,
+										);
+
+										// If we have gas cost in USD, calculate estimated profit
+										if (result.gasCostUsd) {
+											const profitUsd = tipUsd - result.gasCostUsd;
+											result.estimatedProfitUsd = profitUsd;
+											console.log(
+												`  Estimated profit: $${profitUsd.toFixed(6)} USD ${profitUsd >= 0 ? "✅ PROFITABLE" : "❌ LOSS"}`,
+											);
+										}
+									}
 								}
 							}
 						} catch (feeError) {
@@ -277,6 +309,26 @@ async function checkForExecutableRequisitions(): Promise<{
 			if (canExecute) {
 				executableForUs.push(result);
 			}
+		}
+
+		// After collecting all executable requisitions, sort them by profit (highest first)
+		if (executableForUs.length > 1) {
+			executableForUs.sort((a, b) => {
+				// If both have profit estimates, sort by profit
+				if (
+					a.estimatedProfitUsd !== undefined &&
+					b.estimatedProfitUsd !== undefined
+				) {
+					return b.estimatedProfitUsd - a.estimatedProfitUsd;
+				}
+				// If only one has profit estimate, prioritize the one with profit info
+				if (a.estimatedProfitUsd !== undefined) return -1;
+				if (b.estimatedProfitUsd !== undefined) return 1;
+				// Otherwise don't change order
+				return 0;
+			});
+
+			console.log("Sorted requisitions by estimated profit (highest first)");
 		}
 
 		// Get the first executable requisition to maintain backwards compatibility
@@ -388,6 +440,8 @@ async function monitor(): Promise<void> {
 				operatorTip,
 				gasCostEth,
 				gasCostUsd,
+				operatorTipUsd,
+				estimatedProfitUsd,
 			} of executableRequisitions) {
 				console.log(
 					`\nProcessing requisition: ${requisition.requisition.blueprintHash}`,
@@ -403,6 +457,18 @@ async function monitor(): Promise<void> {
 				}
 				if (operatorTip) {
 					console.log(`Operator tip: ${operatorTip} Pinto`);
+					if (operatorTipUsd) {
+						console.log(
+							`Operator tip value: $${operatorTipUsd.toFixed(6)} USD`,
+						);
+					}
+				}
+				// Add profit display
+				if (estimatedProfitUsd !== undefined) {
+					const isProfitable = estimatedProfitUsd >= 0;
+					console.log(
+						`Estimated profit: $${estimatedProfitUsd.toFixed(6)} USD ${isProfitable ? "✅ PROFITABLE" : "❌ LOSS"}`,
+					);
 				}
 				await executeAction(requisition);
 			}
