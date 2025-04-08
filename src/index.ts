@@ -4,6 +4,7 @@ import {
 	loadPublishedRequisitions,
 	SOW_BLUEPRINT_V0_ADDRESS,
 	findOperatorPlaceholderOffset,
+	getEthUsdPrice,
 } from "./tractor-utils";
 import type { RequisitionEvent } from "./tractor-utils";
 
@@ -37,10 +38,22 @@ if (!PROTOCOL_ADDRESS) {
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
+// Update the simulation results type to be more specific and consistent
+type SimulationResult = {
+	requisition: RequisitionEvent;
+	success: boolean;
+	error: string | null;
+	gasEstimate?: number;
+	gasCostEth?: number;
+	gasCostUsd?: number;
+	operatorTip?: string;
+};
+
 // Function to check if an action can be executed
-async function checkActionCanBeExecuted(): Promise<{
+async function checkForExecutableRequisitions(): Promise<{
 	canExecute: boolean;
 	requisition?: RequisitionEvent;
+	executableRequisitions: SimulationResult[];
 }> {
 	try {
 		console.log("Checking for available requisitions...");
@@ -49,7 +62,17 @@ async function checkActionCanBeExecuted(): Promise<{
 		const latestBlock = await provider.getBlock("latest");
 		if (!latestBlock) {
 			console.error("Could not fetch latest block");
-			return { canExecute: false };
+			return { canExecute: false, executableRequisitions: [] };
+		}
+
+		// Fetch ETH/USD price once at the beginning
+		let ethUsdPrice = 0;
+		try {
+			ethUsdPrice = await getEthUsdPrice(provider);
+			console.log(`Current ETH/USD price: $${ethUsdPrice.toFixed(6)}`);
+		} catch (priceError) {
+			console.error("Failed to fetch ETH/USD price:", priceError);
+			// Continue without USD price if fetching fails
 		}
 
 		// Fetch active requisitions of type sowBlueprintv0
@@ -98,13 +121,135 @@ async function checkActionCanBeExecuted(): Promise<{
 		console.log(`Found ${activeRequisitions.length} active requisitions`);
 
 		if (activeRequisitions.length === 0) {
-			return { canExecute: false };
+			return { canExecute: false, executableRequisitions: [] };
 		}
 
-		// Check if our address is whitelisted as an operator for any of the requisitions
-		const operatorAddress = wallet.address.toLowerCase();
+		// Display information about each active requisition
+		activeRequisitions.forEach((req, index) => {
+			console.log(`Requisition ${index + 1}:`);
+			console.log(`  Publisher: ${req.requisition.blueprint.publisher}`);
+			console.log(`  Blueprint Hash: ${req.requisition.blueprintHash}`);
+			console.log(`  Is Cancelled: ${req.isCancelled}`);
+			console.log(`  Type: ${req.decodedData ? "sowBlueprintv0" : "unknown"}`);
+			console.log(
+				`  Start Time: ${new Date(Number(req.requisition.blueprint.startTime) * 1000).toLocaleString()}`,
+			);
+			console.log(
+				`  End Time: ${new Date(Number(req.requisition.blueprint.endTime) * 1000).toLocaleString()}`,
+			);
+		});
 
-		for (const req of activeRequisitions) {
+		// Create a contract to interact with
+		const protocolAddress = PROTOCOL_ADDRESS as string;
+		const contract = new ethers.Contract(
+			protocolAddress,
+			[
+				"function tractor(tuple(tuple(address publisher, bytes data, bytes32[] operatorPasteInstrs, uint256 maxNonce, uint256 startTime, uint256 endTime) blueprint, bytes32 blueprintHash, bytes signature) requisition, bytes operatorData) external",
+			],
+			wallet,
+		);
+
+		// Then rewrite the simulation part
+		console.log("\nSimulating execution for each requisition:");
+		const simulationResults = await Promise.all(
+			activeRequisitions.map(async (req, index) => {
+				const operatorData = "0x";
+				console.log(
+					`\nSimulating requisition ${index + 1} (${req.requisition.blueprintHash})...`,
+				);
+
+				const result: SimulationResult = {
+					requisition: req,
+					success: false,
+					error: null,
+				};
+
+				// Extract operator tip amount (in Pinto) early
+				if (req.decodedData?.operatorParams?.operatorTipAmount) {
+					result.operatorTip =
+						req.decodedData.operatorParams.operatorTipAmount.toString();
+					console.log(
+						`  Operator tip for requisition ${req.requisition.blueprintHash}: ${result.operatorTip} Pinto`,
+					);
+				}
+
+				// Step 1: Try simulation
+				try {
+					await contract.tractor.staticCall(req.requisition, operatorData);
+					console.log(`✅ Simulation SUCCESSFUL for requisition ${index + 1}`);
+					result.success = true;
+
+					// Step 2: Try gas estimation
+					try {
+						const gasEstimate = await contract.tractor.estimateGas(
+							req.requisition,
+							operatorData,
+						);
+
+						const gasEstimateNumber = Number(gasEstimate);
+						console.log(`   Gas estimate: ${gasEstimateNumber}`);
+						result.gasEstimate = gasEstimateNumber;
+
+						// Step 3: Try to get fee data and calculate ETH cost
+						try {
+							const feeData = await provider.getFeeData();
+							if (feeData.gasPrice) {
+								const gasPriceGwei = Number(feeData.gasPrice) / 1e9;
+								const gasCostEth =
+									(gasEstimateNumber * Number(feeData.gasPrice)) / 1e18;
+								console.log(`   Gas price: ${gasPriceGwei.toFixed(2)} Gwei`);
+								console.log(`   Estimated cost: ${gasCostEth.toFixed(6)} ETH`);
+								result.gasCostEth = gasCostEth;
+
+								// Step 4: Calculate USD cost using pre-fetched ETH/USD price
+								if (result.gasCostEth && ethUsdPrice > 0) {
+									const usdCost = result.gasCostEth * ethUsdPrice;
+									console.log(`   Estimated cost: $${usdCost.toFixed(6)} USD`);
+									result.gasCostUsd = usdCost;
+								}
+							}
+						} catch (feeError) {
+							console.log(
+								`   Could not retrieve gas price: ${feeError instanceof Error ? feeError.message : "unknown error"}`,
+							);
+						}
+					} catch (gasError) {
+						console.log(
+							`   ⚠️ Could not estimate gas: ${gasError instanceof Error ? gasError.message : "unknown error"}`,
+						);
+					}
+				} catch (error) {
+					// Simulation failed
+					let errorMessage = "Unknown error";
+					if (error && typeof error === "object" && "shortMessage" in error) {
+						errorMessage = String(error.shortMessage);
+					} else if (error instanceof Error) {
+						errorMessage = error.message;
+					}
+					console.log(
+						`❌ Simulation FAILED for requisition ${index + 1}: ${errorMessage}`,
+					);
+					result.error = errorMessage;
+				}
+
+				return result;
+			}),
+		);
+
+		// Filter out successful simulations
+		const executables = simulationResults.filter((result) => result.success);
+		console.log(
+			`\n${executables.length} out of ${activeRequisitions.length} requisitions can be executed`,
+		);
+
+		// Check if our address is whitelisted as an operator for any of the executable requisitions
+		const operatorAddress = wallet.address.toLowerCase();
+		const executableForUs: SimulationResult[] = [];
+
+		for (const result of executables) {
+			let canExecute = false;
+			const req = result.requisition;
+
 			if (req.decodedData) {
 				const whitelistedOperators =
 					req.decodedData.operatorParams.whitelistedOperators;
@@ -114,26 +259,48 @@ async function checkActionCanBeExecuted(): Promise<{
 					console.log(
 						`Requisition ${req.requisition.blueprintHash} has no operator restrictions`,
 					);
-					return { canExecute: true, requisition: req };
-				}
-
-				// Check if our address is in the whitelist
-				for (const op of whitelistedOperators) {
-					if (op.toLowerCase() === operatorAddress) {
-						console.log(
-							`Our address is whitelisted for requisition ${req.requisition.blueprintHash}`,
-						);
-						return { canExecute: true, requisition: req };
+					canExecute = true;
+				} else {
+					// Check if our address is in the whitelist
+					for (const op of whitelistedOperators) {
+						if (op.toLowerCase() === operatorAddress) {
+							console.log(
+								`Our address is whitelisted for requisition ${req.requisition.blueprintHash}`,
+							);
+							canExecute = true;
+							break;
+						}
 					}
 				}
 			}
+
+			if (canExecute) {
+				executableForUs.push(result);
+			}
 		}
 
-		console.log("No requisitions available for our operator address");
-		return { canExecute: false };
+		// Get the first executable requisition to maintain backwards compatibility
+		const firstExecutable =
+			executableForUs.length > 0 ? executableForUs[0].requisition : undefined;
+
+		if (executableForUs.length === 0) {
+			console.log(
+				"No executable requisitions available for our operator address",
+			);
+			return { canExecute: false, executableRequisitions: [] };
+		}
+
+		console.log(
+			`Found ${executableForUs.length} executable requisitions for our operator address`,
+		);
+		return {
+			canExecute: executableForUs.length > 0,
+			requisition: firstExecutable,
+			executableRequisitions: executableForUs,
+		};
 	} catch (error) {
 		console.error("Error checking if action can be executed:", error);
-		return { canExecute: false };
+		return { canExecute: false, executableRequisitions: [] };
 	}
 }
 
@@ -162,9 +329,7 @@ async function executeAction(requisition: RequisitionEvent): Promise<void> {
 		// Always simulate the transaction to check if it will succeed
 		console.log("Simulating transaction...");
 		try {
-			await contract.tractor.staticCall(requisition.requisition, operatorData, {
-				gasLimit: 5000000,
-			});
+			await contract.tractor.staticCall(requisition.requisition, operatorData);
 			console.log(
 				"Simulation successful! Transaction should execute properly.",
 			);
@@ -190,9 +355,7 @@ async function executeAction(requisition: RequisitionEvent): Promise<void> {
 
 		// If simulation was successful and we're in execute mode, proceed with the actual transaction
 		console.log("Running in EXECUTE mode. Submitting tractor transaction...");
-		const tx = await contract.tractor(requisition.requisition, operatorData, {
-			gasLimit: 5000000, // Add some extra gas just to be safe
-		});
+		const tx = await contract.tractor(requisition.requisition, operatorData);
 
 		console.log(`Transaction submitted: ${tx.hash}`);
 		console.log("Waiting for transaction confirmation...");
@@ -205,18 +368,46 @@ async function executeAction(requisition: RequisitionEvent): Promise<void> {
 	}
 }
 
-// Main monitoring function
+// Main monitoring function - update to handle multiple requisitions
 async function monitor(): Promise<void> {
 	console.log("Monitoring started...");
 
 	try {
-		const { canExecute, requisition } = await checkActionCanBeExecuted();
+		const { canExecute, executableRequisitions } =
+			await checkForExecutableRequisitions();
 
-		if (canExecute && requisition) {
-			console.log("Action can be executed, proceeding...");
-			await executeAction(requisition);
+		if (canExecute && executableRequisitions.length > 0) {
+			console.log(
+				`${executableRequisitions.length} actions can be executed, proceeding...`,
+			);
+
+			// Execute each requisition sequentially
+			for (const {
+				requisition,
+				gasEstimate,
+				operatorTip,
+				gasCostEth,
+				gasCostUsd,
+			} of executableRequisitions) {
+				console.log(
+					`\nProcessing requisition: ${requisition.requisition.blueprintHash}`,
+				);
+				if (gasEstimate) {
+					console.log(`Estimated gas: ${gasEstimate}`);
+				}
+				if (gasCostEth) {
+					console.log(`Estimated cost: ${gasCostEth.toFixed(6)} ETH`);
+				}
+				if (gasCostUsd) {
+					console.log(`Estimated cost: $${gasCostUsd.toFixed(6)} USD`);
+				}
+				if (operatorTip) {
+					console.log(`Operator tip: ${operatorTip} Pinto`);
+				}
+				await executeAction(requisition);
+			}
 		} else {
-			console.log("Action cannot be executed at this time");
+			console.log("No actions can be executed at this time");
 		}
 	} catch (error) {
 		console.error("Error in monitoring cycle:", error);

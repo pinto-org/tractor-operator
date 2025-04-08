@@ -389,6 +389,34 @@ export const SOW_BLUEPRINT_V0_ADDRESS =
 	"0x7F42Cb776120fcBF69De504DAFD20f08c568AAFD";
 export const SOW_BLUEPRINT_V0_SELECTOR = "0xe8bd8a76";
 
+// ETH/USD Price Feed on Base
+export const ETH_USD_PRICE_FEED_ADDRESS =
+	"0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70";
+
+// ABI for Chainlink Price Feed
+const chainlinkPriceFeedABI = [
+	{
+		inputs: [],
+		name: "latestRoundData",
+		outputs: [
+			{ name: "roundId", type: "uint80" },
+			{ name: "answer", type: "int256" },
+			{ name: "startedAt", type: "uint256" },
+			{ name: "updatedAt", type: "uint256" },
+			{ name: "answeredInRound", type: "uint80" },
+		],
+		stateMutability: "view",
+		type: "function",
+	},
+	{
+		inputs: [],
+		name: "decimals",
+		outputs: [{ name: "", type: "uint8" }],
+		stateMutability: "view",
+		type: "function",
+	},
+];
+
 /**
  * Helper function to get token index from contract
  */
@@ -1342,4 +1370,39 @@ export async function fetchTractorExecutions(
 			sowEvent: result.sowData,
 		};
 	});
+}
+
+/**
+ * Fetches the current ETH/USD price from Chainlink oracle on Base
+ * @param provider Ethers provider
+ * @returns The ETH/USD price with full precision
+ */
+export async function getEthUsdPrice(
+	provider: ethers.Provider,
+): Promise<number> {
+	try {
+		const priceFeed = new ethers.Contract(
+			ETH_USD_PRICE_FEED_ADDRESS,
+			chainlinkPriceFeedABI,
+			provider,
+		);
+
+		// Get the latest price data
+		const [, answer, , updatedAt] = await priceFeed.latestRoundData();
+		const decimals = await priceFeed.decimals();
+
+		// Convert the price to a human-readable format with full precision
+		const price = Number(answer) / 10 ** Number(decimals);
+
+		// Log with timestamp for when the price was last updated
+		const lastUpdated = new Date(Number(updatedAt) * 1000).toLocaleString();
+		console.log(
+			`Current ETH/USD price: $${price.toFixed(6)} (last updated: ${lastUpdated})`,
+		);
+
+		return price;
+	} catch (error) {
+		console.error("Failed to fetch ETH/USD price:", error);
+		return 0; // Return 0 if we couldn't fetch the price
+	}
 }
